@@ -1,0 +1,183 @@
+{
+  "_description": "Passive fingerprint signatures for ASIC miners. Used only for identification, no authentication attempted.",
+  "miners": [
+    {
+      "id": "antminer",
+      "vendor": "Bitmain",
+      "models": ["S9", "S17", "S19", "S19j", "S19 XP", "S21", "T19", "L7", "DR5", "Z15"],
+      "http_paths": ["/", "/cgi-bin/get_system_info.cgi", "/cgi-bin/get_miner_conf.cgi"],
+      "title_patterns": ["Antminer", "antMiner", "ANTMINER"],
+      "body_patterns": ["Antminer", "cgminer", "bmminer", "Bitmain"],
+      "common_ports": [80, 443],
+      "auth_indicator_path": "/cgi-bin/get_system_info.cgi",
+      "firmware_extraction": {
+        "path": "/",
+        "regex": "[vV]ersion[:\"\\s]*([0-9]{4}[0-9]{2}[0-9]{2}|[0-9]+\\.[0-9]+\\.[0-9]+)",
+        "note": "Antminer stock firmware embeds date in page or via /cgi-bin/get_system_info.cgi"
+      }
+    },
+    {
+      "id": "whatsminer",
+      "vendor": "MicroBT",
+      "models": ["M20", "M30", "M31", "M32", "M50", "M53", "M60", "M63"],
+      "http_paths": ["/", "/cgi-bin/admin/get_info.cgi"],
+      "title_patterns": ["Whatsminer", "WhatsMiner", "whatsminer"],
+      "body_patterns": ["Whatsminer", "MicroBT", "whatsminer"],
+      "common_ports": [80, 443],
+      "auth_indicator_path": "/cgi-bin/admin/get_info.cgi",
+      "firmware_extraction": {
+        "path": "/",
+        "regex": "[vV]ersion[:\"\\s]*([0-9]+\\.[0-9]+\\.[0-9]+)",
+        "note": "Whatsminer FW version often visible on status page"
+      }
+    },
+    {
+      "id": "avalon",
+      "vendor": "Canaan",
+      "models": ["A10", "A11", "A12", "A13"],
+      "http_paths": ["/", "/cgi-bin/miner_status.cgi"],
+      "title_patterns": ["Avalon", "AvalonMiner", "Canaan"],
+      "body_patterns": ["Avalon", "Canaan", "avalon"],
+      "common_ports": [80, 443],
+      "auth_indicator_path": "/cgi-bin/miner_status.cgi",
+      "firmware_extraction": {
+        "path": "/",
+        "regex": "[vV]ersion[\"\\s:]*([0-9]+\\.[0-9]+\\.[0-9]+)",
+        "note": "Avalon version in status page"
+      }
+    },
+    {
+      "id": "braiins_os",
+      "vendor": "Braiins",
+      "models": ["Bosminer", "Braiins OS"],
+      "http_paths": ["/", "/api/v1/status", "/api/v1/overview"],
+      "title_patterns": ["Braiins", "Bosminer", "bosminer"],
+      "body_patterns": ["Braiins OS", "braiins", "bos+"],
+      "common_ports": [80, 443],
+      "auth_indicator_path": "/api/v1/status",
+      "firmware_extraction": {
+        "path": "/api/v1/status",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "Braiins REST API returns JSON with version"
+      }
+    },
+    {
+      "id": "cgminer_api",
+      "vendor": "Generic",
+      "models": ["cgminer", "bfgminer", "sgminer"],
+      "http_paths": [],
+      "title_patterns": [],
+      "body_patterns": [],
+      "common_ports": [4028],
+      "auth_indicator_path": null,
+      "note": "cgminer RPC API on port 4028 — plaintext, no auth by default"
+    },
+    {
+      "id": "vnish",
+      "vendor": "Vnish",
+      "models": ["Vnish OS"],
+      "http_paths": ["/", "/api/summary"],
+      "title_patterns": ["Vnish", "vnish"],
+      "body_patterns": ["Vnish Firmware", "vnish"],
+      "common_ports": [80, 443],
+      "auth_indicator_path": "/api/summary"
+    },
+    {
+      "id": "luxor",
+      "vendor": "Luxor",
+      "models": ["LuxOS"],
+      "http_paths": ["/", "/api/status"],
+      "title_patterns": ["LuxOS", "Luxor", "luxor"],
+      "body_patterns": ["LuxOS", "luxor"],
+      "common_ports": [80, 443, 4028, 3333],
+      "auth_indicator_path": "/api/status"
+    },
+    {
+      "id": "bitaxe",
+      "vendor": "OSMU (Open Source Miners United)",
+      "models": ["Bitaxe Ultra", "Bitaxe Supra", "Bitaxe Gamma", "Bitaxe Hex", "Bitaxe Max"],
+      "http_paths": ["/", "/api/system", "/api/system/info", "/api/miner"],
+      "title_patterns": ["Bitaxe", "BitAxe", "bitaxe", "BITAXE", "ESP-Miner"],
+      "body_patterns": ["Bitaxe", "BitAxe", "bitaxe", "BM1366", "BM1368", "BM1397"],
+      "common_ports": [80],
+      "auth_indicator_path": "/api/system",
+      "firmware_extraction": {
+        "path": "/api/system",
+        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "ESP-Miner firmware exposes version via /api/system JSON"
+      }
+    },
+    {
+      "id": "nerdqaxe",
+      "vendor": "OSMU (Open Source Miners United)",
+      "models": ["NerdQaxe", "NerdQaxe+", "NerdQAxe+"],
+      "http_paths": ["/", "/api/system", "/api/system/info", "/api/miner"],
+      "title_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "NerdQaxe+", "NerdQAxe+"],
+      "body_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "BM1366", "BM1368"],
+      "common_ports": [80],
+      "auth_indicator_path": "/api/system",
+      "firmware_extraction": {
+        "path": "/api/system",
+        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "ESP-Miner firmware, shared codebase with Bitaxe"
+      }
+    },
+    {
+      "id": "esp_miner",
+      "vendor": "OSMU / Generic",
+      "models": ["ESP-Miner", "ESP32-S3 Miner", "OSMU Board"],
+      "http_paths": ["/", "/api/system", "/api/system/info"],
+      "title_patterns": ["ESP-Miner", "ESP Miner", "Open Source Miner", "OSMU"],
+      "body_patterns": ["ESP-Miner", "ASIC Miner", "BM1366", "BM1368", "BM1397", "ESP32"],
+      "common_ports": [80],
+      "auth_indicator_path": "/api/system",
+      "firmware_extraction": {
+        "path": "/api/system",
+        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "Catch-all for community ESP32-based OSMU miners"
+      },
+      "note": "Catch-all signature for unrecognized ESP-Miner derivatives. Will only match if more specific Bitaxe/NerdQaxe patterns don't trigger first."
+    },
+    {
+      "id": "climaxpool",
+      "vendor": "Community / Custom",
+      "models": ["ClimaxPool Dashboard", "ClimaxPool Proxy"],
+      "http_paths": ["/"],
+      "title_patterns": ["ClimaxPool", "Climax Pool", "climaxpool"],
+      "body_patterns": ["ClimaxPool", "climaxpool", "Climax Pool"],
+      "common_ports": [80, 3333],
+      "auth_indicator_path": null,
+      "note": "Custom Node.js mining pool dashboard. Typically deployed as Stratum proxy + monitoring on OSMU miner hardware."
+    },
+    {
+      "id": "axeos",
+      "vendor": "AxeOS / OSMU",
+      "models": ["AxeOS Bitaxe", "AxeOS"],
+      "http_paths": ["/", "/api/system/info"],
+      "title_patterns": ["AxeOS", "axeos", "AXEOS"],
+      "body_patterns": ["AxeOS", "axeos", "ASICModel", "BM1366", "BM1368", "BM1370", "BM1397"],
+      "common_ports": [80],
+      "auth_indicator_path": "/api/system/info",
+      "firmware_extraction": {
+        "path": "/api/system/info",
+        "regex": "\"axeOSVersion\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "AxeOS exposes version via /api/system/info JSON. Field: axeOSVersion"
+      }
+    },
+    {
+      "id": "nerd_dashboard",
+      "vendor": "Nerd* Dashboard / OSMU",
+      "models": ["NerdQaxe", "NerdQAxe+", "NerdOCTAXE"],
+      "http_paths": ["/", "/api/system/info"],
+      "title_patterns": ["Nerd* Dashboard", "NerdQaxe", "NerdQAxe"],
+      "body_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "Nerd* Dashboard", "asicCount", "deviceModel", "BM1370"],
+      "common_ports": [80],
+      "auth_indicator_path": "/api/system/info",
+      "firmware_extraction": {
+        "path": "/api/system/info",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "Nerd Dashboard exposes version via /api/system/info JSON. Field: version"
+      }
+    }
+  ]
+}

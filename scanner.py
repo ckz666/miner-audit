@@ -79,7 +79,10 @@ def _progress_bar(current: int, total: int, label: str = "", width: int = 30):
     pct = current / total
     filled = int(width * pct)
     bar = "█" * filled + "░" * (width - filled)
-    sys.stderr.write(f"\r  {c('progress', f'[{bar}]')} {pct*100:5.1f}% ({current}/{total})  {label}")
+    # Pad the label to a fixed width — it now often includes the
+    # last-scanned IP, which varies in length, and without padding a
+    # shorter label leaves stale characters from the previous longer one.
+    sys.stderr.write(f"\r  {c('progress', f'[{bar}]')} {pct*100:5.1f}% ({current}/{total})  {label:<42}")
     sys.stderr.flush()
 
 
@@ -301,13 +304,14 @@ async def run_scan(
         _stage(f"Phase 1/2: Port scanning {total_hosts} hosts... (Ctrl+C to stop early and fingerprint what's found so far)")
 
     # Progress tracking for the progress bar
-    progress = {"scanned": 0, "hits": 0}
+    progress = {"scanned": 0, "hits": 0, "last_ip": ""}
 
-    async def _progress_cb(hits: int, scanned: int):
+    async def _progress_cb(hits: int, scanned: int, last_ip: str):
         progress["hits"] = hits
         progress["scanned"] = scanned
+        progress["last_ip"] = last_ip
         if not json_output:
-            _progress_bar(scanned, total_hosts, f"open: {hits}")
+            _progress_bar(scanned, total_hosts, f"open: {hits}  last: {last_ip}")
 
     try:
         port_results = await scan_network(
@@ -370,7 +374,7 @@ async def run_scan(
                     sys.stderr.write(f"\r{' '*80}\r")
                     sys.stderr.write(f"  {c('dim', '·')} {c('detail', hr.ip):<16} not a mining device\n")
                     sys.stderr.flush()
-                _progress_bar(fp_progress["done"], hosts_with_open_ports, f"miners: {fp_progress['found']}")
+                _progress_bar(fp_progress["done"], hosts_with_open_ports, f"miners: {fp_progress['found']}  last: {hr.ip}")
         return result
 
     # Real Task objects, driven with asyncio.wait() rather than

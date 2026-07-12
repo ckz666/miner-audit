@@ -158,7 +158,7 @@ async def scan_network(
         ports: List of ports to scan (default: MINER_PORTS keys)
         concurrency: Max concurrent connections
         timeout: Per-port timeout in seconds
-        progress_callback: Optional async callable(hits, total_scanned)
+        progress_callback: Optional async callable(hits, total_scanned, last_ip)
         rate_limit: Max new connection attempts per second across the whole
             scan (default 300). This — not concurrency — is what actually
             protects intermediate network gear on large/mostly-empty
@@ -222,7 +222,7 @@ async def scan_network(
             if r.open_ports:
                 results.append(r)
             if progress_callback:
-                await progress_callback(len(results), scanned)
+                await progress_callback(len(results), scanned, r.ip)
 
     return results
 

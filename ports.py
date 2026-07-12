@@ -31,6 +31,18 @@ class HostResult:
     scan_time_ms: float = 0.0
 
 
+class ScanInterrupted(Exception):
+    """
+    Raised when a scan is cut short (Ctrl+C) so the caller can still get at
+    whatever was found before the interrupt, instead of losing it when the
+    exception unwinds through scan_network's local state.
+    """
+
+    def __init__(self, partial_results: list[HostResult]):
+        super().__init__(f"scan interrupted with {len(partial_results)} host(s) found so far")
+        self.partial_results = partial_results
+
+
 class _RateLimiter:
     """
     Token-bucket limiter capping new connection attempts per second.
@@ -136,6 +148,7 @@ async def scan_network(
     timeout: float = 1.0,
     progress_callback=None,
     rate_limit: Optional[float] = 300,
+    interrupted: Optional[asyncio.Event] = None,
 ) -> list[HostResult]:
     """
     Scan a network range or list of IPs.
@@ -150,6 +163,12 @@ async def scan_network(
             scan (default 300). This — not concurrency — is what actually
             protects intermediate network gear on large/mostly-empty
             ranges. Pass None to disable.
+        interrupted: Optional asyncio.Event the caller sets (e.g. from a
+            SIGINT handler) to stop early. Checked cooperatively between
+            completions — plain KeyboardInterrupt doesn't reliably land
+            inside a specific coroutine frame, since SIGINT typically
+            interrupts the event loop's own dispatch rather than whatever
+            "await" happens to be pending in a particular task.
 
     Returns:
         List of HostResult, only for hosts with at least one open port
@@ -181,16 +200,29 @@ async def scan_network(
         async with sem:
             return await scan_host(ip, ports, concurrency=50, timeout=timeout, rate_limiter=rate_limiter)
 
-    tasks = [_scan_one(ip) for ip in hosts]
+    # Real Task objects (not bare coroutines) so interrupt handling holds
+    # cancellable handles. Driven with asyncio.wait() rather than
+    # as_completed() — abandoning an as_completed() iterator partway
+    # through (as an early-interrupt break does) leaks its internal waiter
+    # coroutines and prints "was never awaited" warnings at GC time.
+    pending = {asyncio.ensure_future(_scan_one(ip)) for ip in hosts}
     scanned = 0
 
-    for coro in asyncio.as_completed(tasks):
-        r = await coro
-        scanned += 1
-        if r.open_ports:
-            results.append(r)
-        if progress_callback:
-            await progress_callback(len(results), scanned)
+    while pending:
+        if interrupted is not None and interrupted.is_set():
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            raise ScanInterrupted(results)
+
+        done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            r = t.result()
+            scanned += 1
+            if r.open_ports:
+                results.append(r)
+            if progress_callback:
+                await progress_callback(len(results), scanned)
 
     return results
 

@@ -25,6 +25,12 @@ with open(_signatures_path) as f:
 # alt-HTTPS port on embedded web UIs.
 _HTTPS_PORTS = {443, 8443}
 
+# Ports that are already known to speak something other than HTTP — no
+# point sending a GET and waiting out a full timeout for a response that
+# will never come. Each of these already gets its own risk signal in
+# _assess_risk.
+_KNOWN_NON_HTTP_PORTS = {22, 3333, 4028}
+
 
 @dataclass
 class MinerFingerprint:
@@ -80,8 +86,15 @@ async def _http_get(
         writer.write(request.encode())
         await writer.drain()
 
-        # Read raw response
+        # Read raw response. Stop as soon as we can tell the message is
+        # complete (Content-Length reached, or the chunked terminator seen)
+        # instead of always waiting for the peer to close the connection or
+        # for the read to time out — plenty of embedded miner httpds ignore
+        # "Connection: close" and idle-hold the socket open, which otherwise
+        # means paying the full timeout on every single request.
         response = b""
+        expected_end: Optional[int] = None
+        is_chunked = False
         while True:
             try:
                 chunk = await asyncio.wait_for(reader.read(4096), timeout=timeout)
@@ -91,6 +104,22 @@ async def _http_get(
                 if len(response) > 131072:
                     break
             except asyncio.TimeoutError:
+                break
+
+            if expected_end is None and not is_chunked:
+                hdr_end = response.find(b"\r\n\r\n")
+                if hdr_end != -1:
+                    hdr_text = response[:hdr_end].decode("utf-8", errors="replace")
+                    if re.search(r"transfer-encoding:\s*chunked", hdr_text, re.IGNORECASE):
+                        is_chunked = True
+                    else:
+                        cl_match = re.search(r"content-length:\s*(\d+)", hdr_text, re.IGNORECASE)
+                        if cl_match:
+                            expected_end = hdr_end + 4 + int(cl_match.group(1))
+
+            if expected_end is not None and len(response) >= expected_end:
+                break
+            if is_chunked and response.endswith(b"0\r\n\r\n"):
                 break
 
         # Close the socket defensively: embedded miner httpds routinely RST
@@ -293,11 +322,12 @@ async def fingerprint_host(ip: str, open_ports: dict[int, str], timeout: float =
     """
     fp = MinerFingerprint(ip=ip, open_ports=list(open_ports.keys()))
 
-    # Determine which HTTP ports to probe — try all open ports
-    # (miner web UIs sometimes run on non-standard ports)
-    # Prioritize known HTTP ports first, then try the rest
+    # Determine which HTTP ports to probe — try all open ports except ones
+    # already known to be something else (miner web UIs sometimes run on
+    # non-standard ports, so we don't want to be too narrow here).
+    # Prioritize known HTTP ports first, then try the rest.
     known_http = [80, 443, 8080]
-    other_ports = [p for p in open_ports if p not in known_http]
+    other_ports = [p for p in open_ports if p not in known_http and p not in _KNOWN_NON_HTTP_PORTS]
     http_ports = [p for p in known_http if p in open_ports] + other_ports
 
     if not http_ports:
@@ -314,9 +344,14 @@ async def fingerprint_host(ip: str, open_ports: dict[int, str], timeout: float =
     best_body: Optional[str] = None
     last_body: Optional[str] = None
 
-    for port in http_ports:
-        # First try root path
-        status, body, path = await _try_http_paths(ip, ["/"], port, timeout)
+    # Fire the root-path request at every candidate port at once instead of
+    # waiting on them one at a time — matters when a host exposes more than
+    # one HTTP-ish port (e.g. a pool dashboard also serving on an alt port).
+    root_responses = await asyncio.gather(
+        *(_try_http_paths(ip, ["/"], port, timeout) for port in http_ports)
+    )
+
+    for status, body, path in root_responses:
         if status <= 0:
             continue
 
@@ -354,22 +389,30 @@ async def fingerprint_host(ip: str, open_ports: dict[int, str], timeout: float =
         fp.firmware_version = _extract_version(best_body or "", best_match)
 
         # If not found on root page, try the firmware-specific API endpoint
+        # — queried on every candidate port at once, then resolved in
+        # http_ports order so the result is the same as trying them one by
+        # one, just without paying for each port's timeout in sequence.
         if not fp.firmware_version:
             fw_conf = best_match.get("firmware_extraction", {})
             fw_path = fw_conf.get("path", "")
             if fw_path and fw_path != "/":
-                for port in http_ports:
-                    fw_code, fw_body, _ = await _try_http_paths(ip, [fw_path], port, timeout)
+                fw_responses = await asyncio.gather(
+                    *(_try_http_paths(ip, [fw_path], port, timeout) for port in http_ports)
+                )
+                for fw_code, fw_body, _ in fw_responses:
                     if fw_code == 200:
                         fp.firmware_version = _extract_version(fw_body, best_match)
                         if fp.firmware_version:
                             break
 
-        # Check auth status on a sensitive endpoint
+        # Check auth status on a sensitive endpoint, same one-request-per-port
+        # fan-out, resolved in http_ports order.
         auth_path = best_match.get("auth_indicator_path")
         if auth_path:
-            for port in http_ports:
-                status, body, _ = await _try_http_paths(ip, [auth_path], port, timeout)
+            auth_responses = await asyncio.gather(
+                *(_try_http_paths(ip, [auth_path], port, timeout) for port in http_ports)
+            )
+            for status, body, _ in auth_responses:
                 if status == 200:
                     fp.auth_required = False
                     break
@@ -380,9 +423,7 @@ async def fingerprint_host(ip: str, open_ports: dict[int, str], timeout: float =
                     # Redirect to a login page is itself an auth-required signal
                     fp.auth_required = True
                     break
-                elif status == -1:
-                    continue
-            # status == 0 or all failed → None (unknown)
+            # status == 0/-1 or all failed → None (unknown)
     elif 4028 in fp.open_ports:
         fp.vendor = "Generic"
         fp.miner_id = "cgminer_api"

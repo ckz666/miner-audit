@@ -22,11 +22,13 @@ import argparse
 import asyncio
 import json
 import math
+import os
+import signal
 import sys
 import time
 from typing import Optional
 
-from ports import scan_network, HostResult, MINER_PORTS, _parse_targets
+from ports import scan_network, HostResult, MINER_PORTS, _parse_targets, ScanInterrupted
 from fingerprint import fingerprint_host, MinerFingerprint
 
 # ─── Terminal Colors ───────────────────────────────────────────────
@@ -248,6 +250,25 @@ async def run_scan(
 ) -> tuple[list[MinerFingerprint], float, int, int]:
     start_total = time.monotonic()
 
+    # Cooperative interrupt flag instead of relying on KeyboardInterrupt
+    # landing inside a specific coroutine — SIGINT typically interrupts the
+    # event loop's dispatch itself, not whichever "await" happens to be
+    # pending in one particular task, so a plain try/except around a loop
+    # body doesn't reliably catch it. A second Ctrl+C forces an immediate
+    # exit in case cooperative cancellation is taking a moment.
+    interrupted = asyncio.Event()
+    _sigint_count = 0
+
+    def _on_sigint():
+        nonlocal _sigint_count
+        _sigint_count += 1
+        if _sigint_count >= 2:
+            sys.stderr.write("\n  Second interrupt — exiting immediately.\n")
+            os._exit(130)
+        interrupted.set()
+
+    asyncio.get_running_loop().add_signal_handler(signal.SIGINT, _on_sigint)
+
     # Parse targets upfront to know how many hosts
     all_ips = _parse_targets(target)
     total_hosts = len(all_ips)
@@ -277,7 +298,7 @@ async def run_scan(
     phase_start = time.monotonic()
 
     if not json_output:
-        _stage(f"Phase 1/2: Port scanning {total_hosts} hosts...")
+        _stage(f"Phase 1/2: Port scanning {total_hosts} hosts... (Ctrl+C to stop early and fingerprint what's found so far)")
 
     # Progress tracking for the progress bar
     progress = {"scanned": 0, "hits": 0}
@@ -288,16 +309,24 @@ async def run_scan(
         if not json_output:
             _progress_bar(scanned, total_hosts, f"open: {hits}")
 
-    port_results = await scan_network(
-        target,
-        ports=ports,
-        timeout=timeout,
-        progress_callback=_progress_cb,
-        rate_limit=rate_limit,
-    )
-
-    if not json_output:
-        _progress_done(f"Port scan complete — {len(port_results)}/{total_hosts} hosts with open ports ({time.monotonic()-phase_start:.1f}s)")
+    try:
+        port_results = await scan_network(
+            target,
+            ports=ports,
+            timeout=timeout,
+            progress_callback=_progress_cb,
+            rate_limit=rate_limit,
+            interrupted=interrupted,
+        )
+        if not json_output:
+            _progress_done(f"Port scan complete — {len(port_results)}/{total_hosts} hosts with open ports ({time.monotonic()-phase_start:.1f}s)")
+    except ScanInterrupted as e:
+        port_results = e.partial_results
+        if not json_output:
+            _progress_done(c("warn", f"⚠ Port scan interrupted — {len(port_results)} host(s) with open ports found so far ({time.monotonic()-phase_start:.1f}s)"))
+        # This interrupt has been handled — give Phase 2 a fresh flag so it
+        # runs to completion unless the user hits Ctrl+C again.
+        interrupted.clear()
 
     hosts_with_open_ports = len(port_results)
 
@@ -311,7 +340,7 @@ async def run_scan(
     phase_start = time.monotonic()
 
     if not json_output:
-        _stage(f"Phase 2/2: Fingerprinting {hosts_with_open_ports} host(s)...")
+        _stage(f"Phase 2/2: Fingerprinting {hosts_with_open_ports} host(s)... (Ctrl+C to stop early)")
 
     fp_progress = {"done": 0, "found": 0}
     fp_sem = asyncio.Semaphore(FINGERPRINT_CONCURRENCY)
@@ -344,15 +373,31 @@ async def run_scan(
                 _progress_bar(fp_progress["done"], hosts_with_open_ports, f"miners: {fp_progress['found']}")
         return result
 
-    tasks = [_fingerprint_one(hr) for hr in port_results]
-    results = await asyncio.gather(*tasks)
+    # Real Task objects, driven with asyncio.wait() rather than
+    # as_completed() — same reasoning as the port-scan phase: an
+    # early-interrupt break out of as_completed() leaks its internal
+    # waiter coroutines.
+    pending = {asyncio.ensure_future(_fingerprint_one(hr)) for hr in port_results}
 
-    for r in results:
-        if r is not None:
-            fingerprints.append(r)
+    was_interrupted = False
+    while pending:
+        if interrupted.is_set():
+            was_interrupted = True
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            break
+        done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            r = t.result()
+            if r is not None:
+                fingerprints.append(r)
 
     if not json_output:
-        _progress_done(f"Fingerprinting complete — {len(fingerprints)} miner(s) identified ({time.monotonic()-phase_start:.1f}s)")
+        if was_interrupted:
+            _progress_done(c("warn", f"⚠ Fingerprinting interrupted — {len(fingerprints)} miner(s) identified so far ({time.monotonic()-phase_start:.1f}s)"))
+        else:
+            _progress_done(f"Fingerprinting complete — {len(fingerprints)} miner(s) identified ({time.monotonic()-phase_start:.1f}s)")
 
     scan_time = time.monotonic() - start_total
     return fingerprints, scan_time, hosts_with_open_ports, total_hosts
@@ -434,9 +479,18 @@ WARNING: Only scan networks you own or have permission to test.
 
     rate_limit = args.rate_limit if args.rate_limit > 0 else None
 
-    fingerprints, scan_time, hosts_scanned, hosts_total = asyncio.run(
-        run_scan(args.target, timeout=args.timeout, json_output=args.json_output, ports=ports, rate_limit=rate_limit)
-    )
+    # run_scan() already turns a Ctrl+C during either phase into a graceful
+    # early stop with partial results. This is only a last-resort net for
+    # an interrupt landing somewhere else (e.g. a second Ctrl+C, or before
+    # either phase has started) so it prints a clean line instead of a
+    # raw traceback.
+    try:
+        fingerprints, scan_time, hosts_scanned, hosts_total = asyncio.run(
+            run_scan(args.target, timeout=args.timeout, json_output=args.json_output, ports=ports, rate_limit=rate_limit)
+        )
+    except KeyboardInterrupt:
+        sys.stderr.write("\n  Interrupted.\n")
+        sys.exit(130)
 
     print_report(fingerprints, scan_time, hosts_scanned, hosts_total, output_json=args.json_output)
 

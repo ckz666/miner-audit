@@ -123,6 +123,19 @@ def _info(msg: str):
 
 # ─── Report Formatting ─────────────────────────────────────────────
 
+def _port_label(port: int) -> str:
+    """Short human label for a port, e.g. '80 (HTTP)'. Falls back to the raw
+    port number for anything outside the known miner ports (e.g. a custom
+    --ports value)."""
+    desc = MINER_PORTS.get(port)
+    if not desc:
+        return str(port)
+    # MINER_PORTS descriptions are like "HTTP (Miner Web UI)" — take just the
+    # short prefix so this doesn't nest into "80 (HTTP (Miner Web UI))".
+    short = desc.split(" (", 1)[0]
+    return f"{port} ({short})"
+
+
 def _format_fingerprint(fp: MinerFingerprint) -> str:
     lines = []
     risk_color = fp.risk_level
@@ -141,7 +154,7 @@ def _format_fingerprint(fp: MinerFingerprint) -> str:
     if fp.firmware_version:
         lines.append(f"          {c('dim', f'Firmware: {fp.firmware_version}')}")
 
-    ports_str = ", ".join(str(p) for p in fp.open_ports)
+    ports_str = ", ".join(_port_label(p) for p in fp.open_ports)
     lines.append(f"          {c('dim', f'Open ports: {ports_str}')}")
 
     if fp.auth_required is True:

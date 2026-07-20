@@ -63,6 +63,54 @@ class _RateLimiter:
                 await asyncio.sleep((1 - self.tokens) / self.rate)
 
 
+async def _verify_ssh(reader: asyncio.StreamReader, timeout: float) -> bool:
+    """SSH servers send their banner ('SSH-2.0-...') unprompted, immediately
+    on connect — no request needed."""
+    try:
+        banner = await asyncio.wait_for(reader.read(64), timeout=timeout)
+        return banner.startswith(b"SSH-")
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
+async def _verify_stratum(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, timeout: float) -> bool:
+    """Stratum V1 is JSON-RPC over a raw TCP line stream. mining.subscribe is
+    the standard handshake request — read-only, no credentials, exactly what
+    a real miner sends first."""
+    try:
+        writer.write(b'{"id":1,"method":"mining.subscribe","params":[]}\n')
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.read(512), timeout=timeout)
+        stripped = resp.strip()
+        return stripped.startswith(b"{") and b'"id"' in stripped
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
+async def _verify_cgminer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, timeout: float) -> bool:
+    """cgminer's RPC API takes a single-line JSON command and replies with
+    JSON (classic cgminer null-terminates the reply; most derivatives don't
+    bother). 'version' is a read-only info query, same as our HTTP GETs."""
+    try:
+        writer.write(b'{"command":"version"}')
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.read(1024), timeout=timeout)
+        stripped = resp.strip(b"\x00").strip()
+        return stripped.startswith(b"{") and b"STATUS" in resp.upper()
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
+# Ports where a plain TCP connect isn't enough evidence on its own — a
+# middlebox, deception tool, or unrelated service can complete a TCP
+# handshake on any port without actually speaking the protocol we're
+# inferring from the port number. HTTP-ish ports (80/443/8080) aren't in
+# this table: fingerprint_host()'s GET request and title/body matching
+# already only succeeds against a real response, so a middlebox there just
+# naturally fails to match any signature instead of silently being trusted.
+_PROTOCOL_VERIFIERS = {22, 3333, 4028}
+
+
 async def _check_port(
     sem: asyncio.Semaphore,
     ip: str,
@@ -70,17 +118,35 @@ async def _check_port(
     timeout: float = 1.0,
     rate_limiter: Optional[_RateLimiter] = None,
 ) -> tuple[int, bool]:
-    """Check if a single TCP port is open. Returns (port, is_open)."""
+    """Check if a single TCP port is open. Returns (port, is_open).
+
+    For ports where the port number alone is otherwise treated as a strong
+    signal (SSH, Stratum, cgminer RPC — see fingerprint.py's fallback logic
+    for hosts with no HTTP match), a bare TCP connect isn't trusted on its
+    own: verified with a minimal read-only protocol probe first.
+    """
     async with sem:
         if rate_limiter is not None:
             await rate_limiter.acquire()
         try:
-            _, writer = await asyncio.wait_for(
+            reader, writer = await asyncio.wait_for(
                 asyncio.open_connection(ip, port),
                 timeout=timeout,
             )
         except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
             return port, False
+
+        is_open = True
+        if port in _PROTOCOL_VERIFIERS:
+            try:
+                if port == 22:
+                    is_open = await _verify_ssh(reader, timeout)
+                elif port == 3333:
+                    is_open = await _verify_stratum(reader, writer, timeout)
+                elif port == 4028:
+                    is_open = await _verify_cgminer(reader, writer, timeout)
+            except Exception:
+                is_open = False
 
         # The handshake already succeeded at this point — the port is open
         # regardless of what happens during teardown. Embedded miner
@@ -91,7 +157,7 @@ async def _check_port(
             await writer.wait_closed()
         except OSError:
             pass
-        return port, True
+        return port, is_open
 
 
 async def scan_host(

@@ -139,15 +139,15 @@
       "note": "Catch-all signature for unrecognized ESP-Miner derivatives. Will only match if more specific Bitaxe/NerdQaxe patterns don't trigger first."
     },
     {
-      "id": "climaxpool",
-      "vendor": "Community / Custom",
-      "models": ["ClimaxPool Dashboard", "ClimaxPool Proxy"],
+      "id": "public_pool",
+      "vendor": "public-pool",
+      "models": ["Public Pool", "ClimaxPool Dashboard", "ClimaxPool Proxy"],
       "http_paths": ["/"],
-      "title_patterns": ["ClimaxPool", "Climax Pool", "climaxpool"],
+      "title_patterns": ["Public Pool", "ClimaxPool", "Climax Pool", "climaxpool"],
       "body_patterns": ["ClimaxPool", "climaxpool", "Climax Pool"],
       "common_ports": [80, 3333],
       "auth_indicator_path": null,
-      "note": "Custom Node.js mining pool dashboard. Typically deployed as Stratum proxy + monitoring on OSMU miner hardware."
+      "note": "benjamin-wilson/public-pool (Angular UI + NestJS backend) and rebranded forks like ClimaxPool. Stock raw HTML title is 'Public Pool'; the Angular SPA body is otherwise near-empty server-side (<app-root></app-root>), so body_patterns rarely match unless a fork hand-edited index.html — the title is the reliable signal here. auth_indicator_path is genuinely null: the stock backend has no browser-facing auth anywhere (only an optional X-API-Key header on the external share-submission endpoint), so 'Auth: Unknown' is the honest answer for this software, not a missing check."
     },
     {
       "id": "axeos",

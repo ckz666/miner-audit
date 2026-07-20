@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "miner-audit"
+version = "1.0.0"
+description = "Passive ASIC miner security scanner — finds Bitcoin mining hardware on a network and evaluates its security posture using only HTTP GET requests and TCP handshakes."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["security", "pentest", "scanner", "bitcoin", "miner", "asic"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Topic :: Security",
+    "Topic :: System :: Networking :: Monitoring",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[project.urls]
+Repository = "https://github.com/ckz666/miner-audit"
+
+[project.scripts]
+miner-audit = "miner_audit.scanner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+miner_audit = ["signatures.json"]

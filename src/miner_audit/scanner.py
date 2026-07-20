@@ -7,12 +7,13 @@ Identifies Bitcoin mining hardware on a network and evaluates their security pos
 using ONLY passive observation. No credentials are attempted. No configuration is changed.
 
 Usage:
-    python3 scanner.py 192.168.1.0/24              # Scan a subnet
-    python3 scanner.py 10.0.0.1,10.0.0.2,10.0.0.3  # Scan specific IPs
-    python3 scanner.py 192.168.1.1-192.168.1.50    # Scan a range
-    python3 scanner.py -v 192.168.1.0/24           # Verbose output
-    python3 scanner.py --json-output 192.168.1.0/24 # JSON output
-    python3 scanner.py --timeout 2 192.168.1.0/24   # Custom timeout
+    miner-audit 192.168.1.0/24              # Scan a subnet
+    miner-audit 10.0.0.1,10.0.0.2,10.0.0.3  # Scan specific IPs
+    miner-audit 192.168.1.1-192.168.1.50    # Scan a range
+    miner-audit -v 192.168.1.0/24           # Verbose output
+    miner-audit --json-output 192.168.1.0/24 # JSON output
+    miner-audit --timeout 2 192.168.1.0/24   # Custom timeout
+    miner-audit -o report.txt 192.168.1.0/24 # Also save the report to a file
 
 WARNING: Only scan networks you own or have explicit written permission to test.
 Unauthorized scanning may violate laws in your jurisdiction.
@@ -20,6 +21,8 @@ Unauthorized scanning may violate laws in your jurisdiction.
 
 import argparse
 import asyncio
+import contextlib
+import io
 import json
 import math
 import os
@@ -27,10 +30,11 @@ import random
 import signal
 import sys
 import time
+from datetime import datetime
 from typing import Optional
 
-from ports import scan_host, MINER_PORTS, _parse_targets, _RateLimiter, scale_concurrency
-from fingerprint import fingerprint_host, MinerFingerprint
+from .ports import scan_host, MINER_PORTS, _parse_targets, _RateLimiter, scale_concurrency
+from .fingerprint import fingerprint_host, MinerFingerprint
 
 # ─── Terminal Colors ───────────────────────────────────────────────
 
@@ -174,9 +178,13 @@ def print_report(
     hosts_scanned: int,
     hosts_total: int,
     output_json: bool = False,
+    target: str = "",
+    started_at: Optional[datetime] = None,
 ):
     if output_json:
         result = {
+            "target": target,
+            "scan_started": started_at.isoformat() if started_at else None,
             "scan_time_seconds": round(scan_time, 2),
             "hosts_total": hosts_total,
             "hosts_with_open_ports": hosts_scanned,
@@ -212,7 +220,12 @@ def print_report(
     print(c("header", "║              MINER AUDIT — Passive Security Scan                ║"))
     print(c("header", "╚══════════════════════════════════════════════════════════════════╝"))
     print()
-    print(f"  Target:        {hosts_total} hosts")
+    if target:
+        print(f"  Target:        {target} ({hosts_total} hosts)")
+    else:
+        print(f"  Target:        {hosts_total} hosts")
+    if started_at:
+        print(f"  Scan started:  {started_at.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"  Open ports:    {hosts_scanned} hosts ({hosts_scanned/hosts_total*100:.0f}%)" if hosts_total else "")
     print(f"  Miners found:  {len(fingerprints)}")
     print(f"  Scan time:     {scan_time:.1f}s")
@@ -458,12 +471,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 EXAMPLES:
-  python3 scanner.py 192.168.1.0/24           # Scan a /24 subnet
-  python3 scanner.py 10.0.0.1,10.0.0.2        # Scan specific IPs
-  python3 scanner.py 192.168.1.1-192.168.1.50 # Scan an IP range
-  python3 scanner.py -v 10.0.0.0/24           # Verbose: show every host
-  python3 scanner.py -j 10.0.0.0/24           # JSON report
-  python3 scanner.py -p 80,3333,8081 10.0.0.0/24  # Custom ports
+  miner-audit 192.168.1.0/24              # Scan a /24 subnet
+  miner-audit 10.0.0.1,10.0.0.2           # Scan specific IPs
+  miner-audit 192.168.1.1-192.168.1.50    # Scan an IP range
+  miner-audit -v 10.0.0.0/24              # Verbose: show every host
+  miner-audit -j 10.0.0.0/24              # JSON report
+  miner-audit -p 80,3333,8081 10.0.0.0/24 # Custom ports
+  miner-audit -o report.txt 10.0.0.0/24   # Also save the report to a file
 
 WARNING: Only scan networks you own or have permission to test.
         """,
@@ -509,6 +523,16 @@ WARNING: Only scan networks you own or have permission to test.
              "what a router's connection tracking / port-scan detection can absorb, dropping "
              "legitimate traffic along with it. Set to 0 to disable.",
     )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Also write the report to FILE (same text/JSON content as stdout, plus a scan "
+             "timestamp and the target). Live progress and per-host findings during the scan "
+             "still only go to the terminal — this captures the final report, not a raw "
+             "terminal transcript.",
+    )
 
     args = parser.parse_args()
 
@@ -525,6 +549,7 @@ WARNING: Only scan networks you own or have permission to test.
             parser.error(f"invalid --ports value {args.ports!r} — expected comma-separated integers, e.g. '80,8081,3333'")
 
     rate_limit = args.rate_limit if args.rate_limit > 0 else None
+    started_at = datetime.now()
 
     # run_scan() already turns a Ctrl+C during either phase into a graceful
     # early stop with partial results. This is only a last-resort net for
@@ -539,7 +564,40 @@ WARNING: Only scan networks you own or have permission to test.
         sys.stderr.write("\n  Interrupted.\n")
         sys.exit(130)
 
-    print_report(fingerprints, scan_time, hosts_scanned, hosts_total, output_json=args.json_output)
+    report_kwargs = dict(
+        fingerprints=fingerprints,
+        scan_time=scan_time,
+        hosts_scanned=hosts_scanned,
+        hosts_total=hosts_total,
+        output_json=args.json_output,
+        target=args.target,
+        started_at=started_at,
+    )
+
+    print_report(**report_kwargs)
+
+    if args.output:
+        # Generate a second, plain (no ANSI color codes) copy for the file —
+        # this is the final report only, not a raw transcript of the live
+        # progress bar (which is full of \r and escape codes that would look
+        # like garbage outside a terminal). Rendered separately from the
+        # stdout copy above so a colored terminal doesn't leak escape codes
+        # into a file meant to be read in a plain text editor later.
+        # (USE_COLORS is already declared global earlier in this function.)
+        saved_colors = USE_COLORS
+        USE_COLORS = False
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            print_report(**report_kwargs)
+        USE_COLORS = saved_colors
+
+        try:
+            with open(args.output, "w") as f:
+                f.write(buf.getvalue())
+        except OSError as e:
+            sys.stderr.write(f"\n  Warning: could not write report to {args.output!r}: {e}\n")
+        else:
+            sys.stderr.write(f"\n  Report saved to {args.output}\n")
 
 
 if __name__ == "__main__":

@@ -21,19 +21,42 @@ what a device already voluntarily exposes on its default pages.
 
 Each finding gets a risk level (`critical` → `info`) and a one-line explanation.
 
+## Install
+
+```bash
+pip install .              # from a clone of this repo
+# or, for development (edits take effect without reinstalling):
+pip install -e .
+```
+
+This installs a `miner-audit` command on your `PATH`. No external dependencies —
+standard library only.
+
 ## Usage
 
 ```bash
-python3 scanner.py 192.168.1.0/24              # Scan a subnet
-python3 scanner.py 10.0.0.1,10.0.0.2,10.0.0.3  # Scan specific IPs
-python3 scanner.py 192.168.1.1-192.168.1.50    # Scan a range
-python3 scanner.py -v 192.168.1.0/24           # Verbose — show every host, not just hits
-python3 scanner.py -j 192.168.1.0/24            # JSON output
-python3 scanner.py -p 80,3333,8081 192.168.1.0/24  # Custom port list
-python3 scanner.py --rate-limit 100 10.0.0.0/16    # Throttle to 100 conn/s
+miner-audit 192.168.1.0/24              # Scan a subnet
+miner-audit 10.0.0.1,10.0.0.2,10.0.0.3  # Scan specific IPs
+miner-audit 192.168.1.1-192.168.1.50    # Scan a range
+miner-audit -v 192.168.1.0/24           # Verbose — show every host, not just hits
+miner-audit -j 192.168.1.0/24           # JSON output
+miner-audit -p 80,3333,8081 192.168.1.0/24  # Custom port list
+miner-audit --rate-limit 100 10.0.0.0/16    # Throttle to 100 conn/s
+miner-audit -o report.txt 192.168.1.0/24    # Also save the report to a file
 ```
 
-Run `python3 scanner.py --help` for the full flag list.
+Run `miner-audit --help` for the full flag list.
+
+Didn't install it? Run it straight from a clone instead:
+`python3 -m miner_audit.scanner <target>` from the `src/` directory.
+
+### Saving a report (`-o`)
+
+`-o FILE` writes the same final report you see on screen (text or, combined with
+`-j`, JSON) to a file, tagged with the scan target and start time. This is the
+finished report only — not a raw transcript of the live progress bar, which is full
+of `\r`/ANSI codes that would look like garbage outside a terminal. The terminal
+still shows the normal live view either way.
 
 Press **Ctrl+C** once to stop early and report whatever was found so far. A second
 Ctrl+C forces an immediate exit.
@@ -56,10 +79,11 @@ Python 3.10+, standard library only — no dependencies to install.
 
 | File | Purpose |
 |---|---|
-| `scanner.py` | CLI: argument parsing, per-host scan+fingerprint pipeline, text/JSON reports |
-| `ports.py` | Async TCP port scanner with the token-bucket rate limiter |
-| `fingerprint.py` | Passive HTTP-based vendor/model/firmware/auth fingerprinting |
-| `signatures.json` | Per-vendor detection patterns and firmware-extraction rules |
+| `src/miner_audit/scanner.py` | CLI: argument parsing, per-host scan+fingerprint pipeline, text/JSON reports |
+| `src/miner_audit/ports.py` | Async TCP port scanner with the token-bucket rate limiter |
+| `src/miner_audit/fingerprint.py` | Passive HTTP-based vendor/model/firmware/auth fingerprinting |
+| `src/miner_audit/signatures.json` | Per-vendor detection patterns and firmware-extraction rules |
+| `pyproject.toml` | Packaging — installs the `miner-audit` command |
 
 ## How it works
 

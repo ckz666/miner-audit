@@ -23,12 +23,13 @@ import asyncio
 import json
 import math
 import os
+import random
 import signal
 import sys
 import time
 from typing import Optional
 
-from ports import scan_network, HostResult, MINER_PORTS, _parse_targets, ScanInterrupted
+from ports import scan_host, MINER_PORTS, _parse_targets, _RateLimiter, scale_concurrency
 from fingerprint import fingerprint_host, MinerFingerprint
 
 # ─── Terminal Colors ───────────────────────────────────────────────
@@ -55,13 +56,15 @@ COLORS = {
 USE_COLORS = sys.stdout.isatty()
 VERBOSE = False
 
-# Bounds how many hosts are fingerprinted concurrently. Unlike the port-scan
-# phase (which only opens one TCP connection per port per host and scales its
+# Bounds how many hosts are fingerprinted concurrently. Unlike the port scan
+# step (which only opens one TCP connection per port per host and scales its
 # semaphore with range size), fingerprinting issues several sequential HTTP
 # requests per host — running it unbounded via bare asyncio.gather() would
 # open connections to every host with an open port all at once, which is
 # exactly the ">4000 simultaneous connections" problem ports.py's own
-# concurrency scaling is designed to avoid.
+# concurrency scaling is designed to avoid. Kept as a separate, smaller
+# semaphore from the port-scan one so the two steps — pipelined per host
+# below — don't compete for the same concurrency budget.
 FINGERPRINT_CONCURRENCY = 50
 
 
@@ -276,6 +279,11 @@ async def run_scan(
     all_ips = _parse_targets(target)
     total_hosts = len(all_ips)
 
+    # Shuffle to spread timeout-prone hosts among fast-failing ones —
+    # sequential IP order gets stuck on dead subnets that silently drop
+    # packets.
+    random.shuffle(all_ips)
+
     if ports is None:
         ports = list(MINER_PORTS.keys())
 
@@ -297,71 +305,49 @@ async def run_scan(
             if timeout < 2.0:
                 _info(c("dim", f"   Slow IoT devices (ESP32/Shelly) may need ≥2s timeout to respond."))
 
-    # ── Phase 1: Port Scan ──────────────────────────────────────
-    phase_start = time.monotonic()
+    if total_hosts == 0:
+        return [], time.monotonic() - start_total, 0, 0
 
+    # ── Pipeline: scan + fingerprint per host ────────────────────
+    #
+    # Each host runs its port scan, and — if it has an open port — its
+    # fingerprint immediately after, without waiting for every other host's
+    # port scan to finish first. The two steps still use separate semaphores
+    # (scan_sem sized for many short TCP connects, fp_sem sized much smaller
+    # for the heavier sequential HTTP fingerprinting requests), so a host
+    # that starts fingerprinting frees its scan_sem slot right away and lets
+    # another host's port scan start — that overlap is the whole point.
     if not json_output:
-        _stage(f"Phase 1/2: Port scanning {total_hosts} hosts... (Ctrl+C to stop early and fingerprint what's found so far)")
+        _stage(f"Scanning + fingerprinting {total_hosts} host(s)... (Ctrl+C to stop early and report what's found so far)")
 
-    # Progress tracking for the progress bar
-    progress = {"scanned": 0, "hits": 0, "last_ip": ""}
-
-    async def _progress_cb(hits: int, scanned: int, last_ip: str):
-        progress["hits"] = hits
-        progress["scanned"] = scanned
-        progress["last_ip"] = last_ip
-        if not json_output:
-            _progress_bar(scanned, total_hosts, f"open: {hits}  last: {last_ip}")
-
-    try:
-        port_results = await scan_network(
-            target,
-            ports=ports,
-            timeout=timeout,
-            progress_callback=_progress_cb,
-            rate_limit=rate_limit,
-            interrupted=interrupted,
-        )
-        if not json_output:
-            _progress_done(f"Port scan complete — {len(port_results)}/{total_hosts} hosts with open ports ({time.monotonic()-phase_start:.1f}s)")
-    except ScanInterrupted as e:
-        port_results = e.partial_results
-        if not json_output:
-            _progress_done(c("warn", f"⚠ Port scan interrupted — {len(port_results)} host(s) with open ports found so far ({time.monotonic()-phase_start:.1f}s)"))
-        # This interrupt has been handled — give Phase 2 a fresh flag so it
-        # runs to completion unless the user hits Ctrl+C again.
-        interrupted.clear()
-
-    hosts_with_open_ports = len(port_results)
-
-    # ── Phase 2: Fingerprinting ─────────────────────────────────
-    if hosts_with_open_ports == 0:
-        if not json_output:
-            _info("No hosts with open ports found — skipping fingerprinting.")
-        return [], time.monotonic() - start_total, 0, total_hosts
+    concurrency = scale_concurrency(total_hosts)
+    scan_sem = asyncio.Semaphore(concurrency)
+    fp_sem = asyncio.Semaphore(FINGERPRINT_CONCURRENCY)
+    rate_limiter = _RateLimiter(rate_limit) if rate_limit else None
 
     fingerprints: list[MinerFingerprint] = []
-    phase_start = time.monotonic()
-
-    if not json_output:
-        _stage(f"Phase 2/2: Fingerprinting {hosts_with_open_ports} host(s)... (Ctrl+C to stop early)")
-
-    fp_progress = {"done": 0, "found": 0}
-    fp_sem = asyncio.Semaphore(FINGERPRINT_CONCURRENCY)
+    progress = {"scanned": 0, "hits": 0, "found": 0}
     print_lock = asyncio.Lock()
 
-    async def _fingerprint_one(hr: HostResult) -> Optional[MinerFingerprint]:
-        async with fp_sem:
-            result = await fingerprint_host(hr.ip, hr.open_ports, timeout=timeout)
+    async def _pipeline_one(ip: str) -> None:
+        async with scan_sem:
+            hr = await scan_host(ip, ports, concurrency=50, timeout=timeout, rate_limiter=rate_limiter)
 
-        fp_progress["done"] += 1
-        if result is not None:
-            fp_progress["found"] += 1
+        result: Optional[MinerFingerprint] = None
+        if hr.open_ports:
+            progress["hits"] += 1
+            async with fp_sem:
+                result = await fingerprint_host(hr.ip, hr.open_ports, timeout=timeout)
+            if result is not None:
+                fingerprints.append(result)
+                progress["found"] += 1
+
+        progress["scanned"] += 1
 
         if not json_output:
-            # Serialize terminal writes — with concurrent fingerprinting,
-            # unsynchronized stderr writes from different hosts can
-            # otherwise interleave into garbled output.
+            # Serialize terminal writes — with concurrent hosts in flight,
+            # unsynchronized stderr writes can otherwise interleave into
+            # garbled output.
             async with print_lock:
                 if result is not None:
                     sys.stderr.write(f"\r{' '*80}\r")
@@ -370,18 +356,20 @@ async def run_scan(
                     fw_info = f" (FW: {result.firmware_version})" if result.firmware_version else ""
                     sys.stderr.write(f"  {tag} {c('ip', hr.ip):<16} {c('header', vendor_info):<35}{c('dim', fw_info)}\n")
                     sys.stderr.flush()
-                elif VERBOSE:
+                elif VERBOSE and hr.open_ports:
                     sys.stderr.write(f"\r{' '*80}\r")
                     sys.stderr.write(f"  {c('dim', '·')} {c('detail', hr.ip):<16} not a mining device\n")
                     sys.stderr.flush()
-                _progress_bar(fp_progress["done"], hosts_with_open_ports, f"miners: {fp_progress['found']}  last: {hr.ip}")
-        return result
+                _progress_bar(
+                    progress["scanned"], total_hosts,
+                    f"open: {progress['hits']}  miners: {progress['found']}  last: {hr.ip}",
+                )
 
     # Real Task objects, driven with asyncio.wait() rather than
-    # as_completed() — same reasoning as the port-scan phase: an
-    # early-interrupt break out of as_completed() leaks its internal
-    # waiter coroutines.
-    pending = {asyncio.ensure_future(_fingerprint_one(hr)) for hr in port_results}
+    # as_completed() — an early-interrupt break out of as_completed()
+    # leaks its internal waiter coroutines and prints "was never awaited"
+    # warnings at GC time.
+    pending = {asyncio.ensure_future(_pipeline_one(ip)) for ip in all_ips}
 
     was_interrupted = False
     while pending:
@@ -392,19 +380,15 @@ async def run_scan(
             await asyncio.gather(*pending, return_exceptions=True)
             break
         done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            r = t.result()
-            if r is not None:
-                fingerprints.append(r)
 
     if not json_output:
         if was_interrupted:
-            _progress_done(c("warn", f"⚠ Fingerprinting interrupted — {len(fingerprints)} miner(s) identified so far ({time.monotonic()-phase_start:.1f}s)"))
+            _progress_done(c("warn", f"⚠ Interrupted — {progress['scanned']}/{total_hosts} hosts processed, {len(fingerprints)} miner(s) identified so far ({time.monotonic()-start_total:.1f}s)"))
         else:
-            _progress_done(f"Fingerprinting complete — {len(fingerprints)} miner(s) identified ({time.monotonic()-phase_start:.1f}s)")
+            _progress_done(f"Done — {progress['hits']}/{total_hosts} hosts with open ports, {len(fingerprints)} miner(s) identified ({time.monotonic()-start_total:.1f}s)")
 
     scan_time = time.monotonic() - start_total
-    return fingerprints, scan_time, hosts_with_open_ports, total_hosts
+    return fingerprints, scan_time, progress["hits"], total_hosts
 
 
 # ─── CLI ─────────────────────────────────────────────────────────────

@@ -6,7 +6,6 @@ Uses raw sockets, no external dependencies. Fast, concurrent, read-only.
 
 import asyncio
 import ipaddress
-import random
 import socket
 import time
 from dataclasses import dataclass, field
@@ -29,18 +28,6 @@ class HostResult:
     open_ports: dict[int, str] = field(default_factory=dict)
     error: Optional[str] = None
     scan_time_ms: float = 0.0
-
-
-class ScanInterrupted(Exception):
-    """
-    Raised when a scan is cut short (Ctrl+C) so the caller can still get at
-    whatever was found before the interrupt, instead of losing it when the
-    exception unwinds through scan_network's local state.
-    """
-
-    def __init__(self, partial_results: list[HostResult]):
-        super().__init__(f"scan interrupted with {len(partial_results)} host(s) found so far")
-        self.partial_results = partial_results
 
 
 class _RateLimiter:
@@ -141,90 +128,18 @@ async def scan_host(
     return result
 
 
-async def scan_network(
-    target: str,
-    ports: list[int] = None,
-    concurrency: int = 200,
-    timeout: float = 1.0,
-    progress_callback=None,
-    rate_limit: Optional[float] = 300,
-    interrupted: Optional[asyncio.Event] = None,
-) -> list[HostResult]:
+def scale_concurrency(num_hosts: int, concurrency: int = 200) -> int:
     """
-    Scan a network range or list of IPs.
-
-    Args:
-        target: IP address, CIDR range (e.g. '192.168.1.0/24'), or comma-separated list
-        ports: List of ports to scan (default: MINER_PORTS keys)
-        concurrency: Max concurrent connections
-        timeout: Per-port timeout in seconds
-        progress_callback: Optional async callable(hits, total_scanned, last_ip)
-        rate_limit: Max new connection attempts per second across the whole
-            scan (default 300). This — not concurrency — is what actually
-            protects intermediate network gear on large/mostly-empty
-            ranges. Pass None to disable.
-        interrupted: Optional asyncio.Event the caller sets (e.g. from a
-            SIGINT handler) to stop early. Checked cooperatively between
-            completions — plain KeyboardInterrupt doesn't reliably land
-            inside a specific coroutine frame, since SIGINT typically
-            interrupts the event loop's own dispatch rather than whatever
-            "await" happens to be pending in a particular task.
-
-    Returns:
-        List of HostResult, only for hosts with at least one open port
+    Auto-scale port-scan concurrency for large ranges so there are always
+    enough in-flight scans to keep the rate limiter's token bucket
+    saturated. This no longer needs to be conservative on its own —
+    rate_limit is what actually bounds packets-per-second now.
     """
-    if ports is None:
-        ports = list(MINER_PORTS.keys())
-
-    # Parse targets
-    hosts = _parse_targets(target)
-
-    # Shuffle to spread timeout-prone hosts among fast-failing ones.
-    # Sequential IP scanning gets stuck on dead subnets that silently drop packets.
-    random.shuffle(hosts)
-
-    # Auto-scale concurrency for large ranges so there are always enough
-    # in-flight scans to keep the rate limiter's token bucket saturated.
-    # This no longer needs to be conservative on its own — rate_limit is
-    # what actually bounds packets-per-second now.
-    if len(hosts) > 30000:
-        concurrency = max(concurrency, 400)
-    elif len(hosts) > 10000:
-        concurrency = max(concurrency, 300)
-
-    results: list[HostResult] = []
-    sem = asyncio.Semaphore(concurrency)
-    rate_limiter = _RateLimiter(rate_limit) if rate_limit else None
-
-    async def _scan_one(ip: str):
-        async with sem:
-            return await scan_host(ip, ports, concurrency=50, timeout=timeout, rate_limiter=rate_limiter)
-
-    # Real Task objects (not bare coroutines) so interrupt handling holds
-    # cancellable handles. Driven with asyncio.wait() rather than
-    # as_completed() — abandoning an as_completed() iterator partway
-    # through (as an early-interrupt break does) leaks its internal waiter
-    # coroutines and prints "was never awaited" warnings at GC time.
-    pending = {asyncio.ensure_future(_scan_one(ip)) for ip in hosts}
-    scanned = 0
-
-    while pending:
-        if interrupted is not None and interrupted.is_set():
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            raise ScanInterrupted(results)
-
-        done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            r = t.result()
-            scanned += 1
-            if r.open_ports:
-                results.append(r)
-            if progress_callback:
-                await progress_callback(len(results), scanned, r.ip)
-
-    return results
+    if num_hosts > 30000:
+        return max(concurrency, 400)
+    elif num_hosts > 10000:
+        return max(concurrency, 300)
+    return concurrency
 
 
 def _parse_targets(target: str) -> list[str]:

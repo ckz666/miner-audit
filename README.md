@@ -35,10 +35,8 @@ python3 scanner.py --rate-limit 100 10.0.0.0/16    # Throttle to 100 conn/s
 
 Run `python3 scanner.py --help` for the full flag list.
 
-Press **Ctrl+C** once during either phase to stop it early and move on with whatever
-was found so far (a port scan interrupted early still gets fingerprinted; a
-fingerprint pass interrupted early still gets reported). A second Ctrl+C forces an
-immediate exit.
+Press **Ctrl+C** once to stop early and report whatever was found so far. A second
+Ctrl+C forces an immediate exit.
 
 ## Rate limiting
 
@@ -58,19 +56,25 @@ Python 3.10+, standard library only — no dependencies to install.
 
 | File | Purpose |
 |---|---|
-| `scanner.py` | CLI: argument parsing, two-phase orchestration, text/JSON reports |
+| `scanner.py` | CLI: argument parsing, per-host scan+fingerprint pipeline, text/JSON reports |
 | `ports.py` | Async TCP port scanner with the token-bucket rate limiter |
 | `fingerprint.py` | Passive HTTP-based vendor/model/firmware/auth fingerprinting |
 | `signatures.json` | Per-vendor detection patterns and firmware-extraction rules |
 
 ## How it works
 
-1. **Port scan** — every target IP is checked against a small set of miner-relevant
-   ports (80, 443, 22, 3333, 4028, 8080 by default). Only hosts with at least one
-   open port move on.
-2. **Fingerprint** — each surviving host gets a `GET /` (and vendor-specific
-   follow-up requests) to identify what it's running, whether auth is required, and
-   how old the firmware is. Fingerprinting runs concurrently across hosts and across
-   a single host's candidate ports.
+Each target IP runs through a two-step pipeline, but the steps are pipelined
+*across* hosts rather than run as two separate whole-range passes:
 
-Both phases are read-only: TCP connect + HTTP GET, nothing else.
+1. **Port scan** — checked against a small set of miner-relevant ports (80, 443,
+   22, 3333, 4028, 8080 by default).
+2. **Fingerprint** — if a host has at least one open port, it gets a `GET /` (and
+   vendor-specific follow-up requests) immediately, without waiting for the rest of
+   the range to finish scanning — to identify what it's running, whether auth is
+   required, and how old the firmware is.
+
+The two steps use separate concurrency limits (port scanning is many short TCP
+connects and scales with range size; fingerprinting is a handful of sequential HTTP
+requests per host, capped much lower) so a host that starts fingerprinting doesn't
+block another host's port scan from starting. Both steps are read-only: TCP connect
++ HTTP GET, nothing else.

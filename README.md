@@ -17,6 +17,11 @@ what a device already voluntarily exposes on its default pages.
 - **Auth exposure** — whether the web UI or API is reachable without credentials.
 - **Risky open ports** — unauthenticated `cgminer` RPC (4028), plaintext Stratum V1
   (3333), exposed SSH (22).
+- **Paired Bitcoin node** — a reachable Bitcoin Core P2P port (8333) alongside an
+  already-identified miner/pool is flagged as informational context (mining pools
+  commonly run their own full node). A bare reachable full node with no other
+  mining signal is *not* itself reported as a finding — 8333 being open is normal,
+  expected behavior for any Bitcoin node, not a vulnerability.
 - **Firmware age** — flags firmware older than 1–2 years as a CVE risk.
 
 Each finding gets a risk level (`critical` → `info`) and a one-line explanation.
@@ -113,14 +118,14 @@ Each target IP runs through a two-step pipeline, but the steps are pipelined
 *across* hosts rather than run as two separate whole-range passes:
 
 1. **Port scan** — checked against a small set of miner-relevant ports (80, 443,
-   22, 3333, 4028, 8080 by default). For 22, 3333, and 4028, a bare TCP handshake
-   isn't enough to count as "open": a minimal read-only protocol probe confirms the
-   port actually speaks SSH, Stratum V1, or the cgminer RPC API before trusting it
-   — a middlebox or unrelated service that completes a TCP handshake without
-   speaking the real protocol is otherwise indistinguishable from the real thing,
-   and those three ports are treated as a strong signal on their own further down
-   the pipeline. 80/443/8080 don't need this: the HTTP fingerprint step below
-   already only matches a real response.
+   22, 3333, 4028, 8080, 8333 by default). For 22, 3333, 4028, and 8333, a bare TCP
+   handshake isn't enough to count as "open": a minimal read-only protocol probe
+   confirms the port actually speaks SSH, Stratum V1, the cgminer RPC API, or the
+   Bitcoin P2P wire protocol before trusting it — a middlebox or unrelated service
+   that completes a TCP handshake without speaking the real protocol is otherwise
+   indistinguishable from the real thing, and each of those four ports is treated
+   as a strong signal on its own further down the pipeline. 80/443/8080 don't need
+   this: the HTTP fingerprint step below already only matches a real response.
 2. **Fingerprint** — if a host has at least one open port, it gets a `GET /` (and
    vendor-specific follow-up requests) immediately, without waiting for the rest of
    the range to finish scanning — to identify what it's running, whether auth is
@@ -130,7 +135,7 @@ The two steps use separate concurrency limits (port scanning is many short TCP
 connects and scales with range size; fingerprinting is a handful of sequential HTTP
 requests per host, capped much lower) so a host that starts fingerprinting doesn't
 block another host's port scan from starting. Both steps are read-only: TCP connect
-+ HTTP GET (or the equivalent read-only query for 22/3333/4028), nothing else.
++ HTTP GET (or the equivalent read-only query for 22/3333/4028/8333), nothing else.
 
 ## False positives
 

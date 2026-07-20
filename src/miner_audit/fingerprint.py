@@ -29,7 +29,7 @@ _HTTPS_PORTS = {443, 8443}
 # point sending a GET and waiting out a full timeout for a response that
 # will never come. Each of these already gets its own risk signal in
 # _assess_risk.
-_KNOWN_NON_HTTP_PORTS = {22, 3333, 4028}
+_KNOWN_NON_HTTP_PORTS = {22, 3333, 4028, 8333}
 
 
 @dataclass
@@ -287,6 +287,15 @@ def _assess_risk(fp: MinerFingerprint):
     # SSH open
     if 22 in fp.open_ports:
         risks.append(("medium", "SSH port (22) exposed — check for default credentials"))
+
+    # Bitcoin Core P2P open — not itself a vulnerability (any full node is
+    # meant to be publicly reachable on 8333), just a strong signal this
+    # host likely runs a paired mining pool alongside the miner/dashboard
+    # already identified above. Not used to independently classify a host
+    # as a miner (see fingerprint_host) — a bare reachable full node with
+    # no other mining signal is just... a Bitcoin node.
+    if 8333 in fp.open_ports:
+        risks.append(("info", "Bitcoin Core P2P port (8333) open — full node detected, likely paired with a mining pool"))
 
     # Old firmware — age is computed relative to *today*, not a hardcoded
     # cutoff year, so this stays meaningful as time passes.

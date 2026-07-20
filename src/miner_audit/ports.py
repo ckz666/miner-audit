@@ -5,8 +5,11 @@ Uses raw sockets, no external dependencies. Fast, concurrent, read-only.
 """
 
 import asyncio
+import hashlib
 import ipaddress
+import os
 import socket
+import struct
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -19,6 +22,7 @@ MINER_PORTS = {
     3333: "Stratum V1 (Mining Protocol)",
     4028: "cgminer RPC API",
     8080: "HTTP Alt (Miner Web UI)",
+    8333: "Bitcoin Core P2P (often paired with a mining pool)",
 }
 
 
@@ -101,6 +105,45 @@ async def _verify_cgminer(reader: asyncio.StreamReader, writer: asyncio.StreamWr
         return False
 
 
+def _bitcoin_version_payload() -> bytes:
+    """Minimal but valid Bitcoin P2P 'version' message payload — same
+    handshake any Bitcoin node sends when connecting to a peer, just to
+    identify the protocol. No different in spirit than the JSON probes
+    above; nothing here writes to or configures the remote node."""
+    version = struct.pack("<i", 70015)
+    services = struct.pack("<Q", 0)
+    timestamp = struct.pack("<q", int(time.time()))
+    # addr_recv / addr_from: services(8) + ip(16, IPv4-mapped IPv6) + port(2) = 26 bytes.
+    # Real values don't matter for a bare handshake probe — any well-formed
+    # address is accepted.
+    dummy_addr = struct.pack("<Q", 0) + (b"\x00" * 10 + b"\xff\xff" + bytes(4)) + struct.pack(">H", 8333)
+    nonce = struct.pack("<Q", int.from_bytes(os.urandom(8), "little"))
+    user_agent = b"\x00"  # varint 0 = empty string
+    start_height = struct.pack("<i", 0)
+    relay = b"\x00"
+    return version + services + timestamp + dummy_addr + dummy_addr + nonce + user_agent + start_height + relay
+
+
+async def _verify_bitcoin_p2p(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, timeout: float) -> bool:
+    """Bitcoin's P2P wire protocol requires the connecting side to speak
+    first (real nodes never send anything unprompted, unlike SSH) — sends a
+    minimal 'version' message and checks the reply starts with the real
+    network magic bytes, which is effectively impossible for an unrelated
+    service or middlebox to produce by coincidence."""
+    MAGIC = b"\xf9\xbe\xb4\xd9"  # mainnet
+    try:
+        payload = _bitcoin_version_payload()
+        checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
+        command = b"version".ljust(12, b"\x00")
+        header = MAGIC + command + struct.pack("<I", len(payload)) + checksum
+        writer.write(header + payload)
+        await writer.drain()
+        resp = await asyncio.wait_for(reader.read(4), timeout=timeout)
+        return resp == MAGIC
+    except (asyncio.TimeoutError, OSError):
+        return False
+
+
 # Ports where a plain TCP connect isn't enough evidence on its own — a
 # middlebox, deception tool, or unrelated service can complete a TCP
 # handshake on any port without actually speaking the protocol we're
@@ -108,7 +151,7 @@ async def _verify_cgminer(reader: asyncio.StreamReader, writer: asyncio.StreamWr
 # this table: fingerprint_host()'s GET request and title/body matching
 # already only succeeds against a real response, so a middlebox there just
 # naturally fails to match any signature instead of silently being trusted.
-_PROTOCOL_VERIFIERS = {22, 3333, 4028}
+_PROTOCOL_VERIFIERS = {22, 3333, 4028, 8333}
 
 
 async def _check_port(
@@ -121,9 +164,10 @@ async def _check_port(
     """Check if a single TCP port is open. Returns (port, is_open).
 
     For ports where the port number alone is otherwise treated as a strong
-    signal (SSH, Stratum, cgminer RPC — see fingerprint.py's fallback logic
-    for hosts with no HTTP match), a bare TCP connect isn't trusted on its
-    own: verified with a minimal read-only protocol probe first.
+    signal (SSH, Stratum, cgminer RPC, Bitcoin P2P — see fingerprint.py's
+    fallback logic for hosts with no HTTP match, and _assess_risk for
+    8333), a bare TCP connect isn't trusted on its own: verified with a
+    minimal read-only protocol probe first.
     """
     async with sem:
         if rate_limiter is not None:
@@ -145,6 +189,8 @@ async def _check_port(
                     is_open = await _verify_stratum(reader, writer, timeout)
                 elif port == 4028:
                     is_open = await _verify_cgminer(reader, writer, timeout)
+                elif port == 8333:
+                    is_open = await _verify_bitcoin_p2p(reader, writer, timeout)
             except Exception:
                 is_open = False
 

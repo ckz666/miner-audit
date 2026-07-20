@@ -174,13 +174,13 @@
       "models": ["NerdQaxe", "NerdQAxe+", "NerdOCTAXE"],
       "http_paths": ["/", "/api/system/info"],
       "title_patterns": ["Nerd* Dashboard", "NerdQaxe", "NerdQAxe"],
-      "body_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "Nerd* Dashboard", "asicCount", "deviceModel", "BM1370"],
+      "body_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "Nerd* Dashboard", "asicCount", "BM1370"],
       "common_ports": [80],
       "auth_indicator_path": "/api/system/info",
       "firmware_extraction": {
         "path": "/api/system/info",
         "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
-        "note": "Nerd Dashboard exposes version via /api/system/info JSON. Field: version"
+        "note": "Nerd Dashboard exposes version via /api/system/info JSON. Field: version. Dropped 'deviceModel' from body_patterns (2026-07-20) — confirmed false-positive: a colleague's EdgeOS (Ubiquiti) router matched on this alone (body-only score=2 clears the threshold), because EdgeOS's own admin JS config happens to reference 'DeviceModel' too. Generic JSON/JS field names are exactly the wrong kind of pattern here — verify any new one isn't a common naming convention outside mining before adding it back."
       }
     }
   ]

@@ -102,6 +102,15 @@ def _verbose(line: str):
         sys.stderr.flush()
 
 
+def _format_duration(seconds: float) -> str:
+    """Format seconds as '0d:00h:03m:34s'."""
+    total = int(round(seconds))
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{days}d:{hours:02d}h:{minutes:02d}m:{secs:02d}s"
+
+
 def _stage(msg: str):
     sys.stderr.write(f"\n  {c('stage', '▸')} {msg}\n")
     sys.stderr.flush()
@@ -315,7 +324,7 @@ async def run_scan(
             else:
                 concurrency = 400 if total_hosts > 30000 else 300 if total_hosts > 10000 else 200
                 est = math.ceil(total_hosts / concurrency * 0.2)  # ~0.2s avg per batch (dead IPs fail in ms)
-            _info(c("warn", f"⚠  Large range ({total_hosts} hosts). Est. scan time: ~{est:.0f}s"))
+            _info(c("warn", f"⚠  Large range ({total_hosts} hosts). Est. scan time: ~{_format_duration(est)}"))
             if timeout < 2.0:
                 _info(c("dim", f"   Slow IoT devices (ESP32/Shelly) may need ≥2s timeout to respond."))
 

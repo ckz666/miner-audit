@@ -37,7 +37,7 @@
       "vendor": "Canaan",
       "models": ["A10", "A11", "A12", "A13"],
       "http_paths": ["/", "/cgi-bin/miner_status.cgi"],
-      "title_patterns": ["Avalon", "AvalonMiner", "Canaan"],
+      "title_patterns": ["Avalon Management System", "AvalonMiner", "Canaan"],
       "body_patterns": ["Canaan"],
       "common_ports": [80, 443],
       "auth_indicator_path": "/cgi-bin/miner_status.cgi",
@@ -46,7 +46,7 @@
         "regex": "[vV]ersion[\"\\s:]*([0-9]+\\.[0-9]+\\.[0-9]+)",
         "note": "Avalon version in status page"
       },
-      "note": "Dropped bare 'Avalon'/'avalon' from body_patterns — 'Avalon' alone is a fairly generic word/brand (FPGA bus naming, unrelated products) that could turn up incidentally in an unrelated device's page body; kept in title_patterns since a device's own page *title* being just 'Avalon' is a more deliberate signal than an incidental body mention. Could not verify /cgi-bin/miner_status.cgi against a live device or an authoritative source (asic-rs's avalonminer backend only implements the cgminer RPC protocol on 4028, not an HTTP API) — flagged as unverified, not confirmed correct."
+      "note": "Replaced bare 'Avalon'/'avalon' (2026-07-20) — confirmed via GitHub search it collides with real unrelated projects (a JS MVVM framework called avalon.js, an Apache commons-jelly module) the same way EdgeOS/deviceModel and ESP32 did elsewhere in this file. Fetched the actual official Canaan-Creative/Avalon-Management-System repo's index.html: real title is 'Avalon Management System', which is what's here now — more specific (helps the specificity tiebreaker too) and still matches the real device via substring. Could not verify /cgi-bin/miner_status.cgi itself against a live device or authoritative source (asic-rs's avalonminer backend only implements the cgminer RPC protocol on 4028, not an HTTP API) — that part is still unverified."
     },
     {
       "id": "braiins_os",
@@ -90,11 +90,11 @@
       "vendor": "Luxor",
       "models": ["LuxOS"],
       "http_paths": ["/", "/api/status"],
-      "title_patterns": ["LuxOS", "Luxor", "luxor"],
-      "body_patterns": ["LuxOS", "luxor"],
+      "title_patterns": ["LuxOS"],
+      "body_patterns": ["LuxOS"],
       "common_ports": [80, 443, 4028, 3333],
       "auth_indicator_path": "/api/status",
-      "note": "UNVERIFIED: couldn't confirm /api/status against any authoritative source — the real luxminer backend in 256foundation/asic-rs only implements the cgminer RPC protocol on port 4028/3333, not an HTTP API, so this path may not exist at all. Title/body patterns (vendor name) are likely fine regardless. No live device available to test."
+      "note": "UNVERIFIED: couldn't confirm /api/status against any authoritative source — the real luxminer backend in 256foundation/asic-rs only implements the cgminer RPC protocol on port 4028/3333, not an HTTP API, so this path may not exist at all. Dropped bare 'Luxor'/'luxor' from both title and body patterns (2026-07-20) — a GitHub search turned up real, unrelated hits (a Julia graphics library, a museum page, an unrelated DeFi frontend) confirming it's exactly the same class of generic-word false-positive as the Avalon/deviceModel/ESP32 fixes elsewhere in this file. I'd previously written here that the vendor-name patterns were 'likely fine regardless' without actually checking — same mistake as the EdgeOS claim, don't repeat it."
     },
     {
       "id": "bitaxe",

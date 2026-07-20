@@ -82,15 +82,17 @@ def _progress_bar(current: int, total: int, label: str = "", width: int = 30):
     pct = current / total
     filled = int(width * pct)
     bar = "█" * filled + "░" * (width - filled)
-    # Pad the label to a fixed width — it now often includes the
-    # last-scanned IP, which varies in length, and without padding a
-    # shorter label leaves stale characters from the previous longer one.
-    sys.stderr.write(f"\r  {c('progress', f'[{bar}]')} {pct*100:5.1f}% ({current}/{total})  {label:<42}")
+    # "\033[K" erases from the cursor to the end of the line — used instead
+    # of padding/overwriting with a guessed number of spaces, since the
+    # label includes the last-scanned IP and can be longer than any fixed
+    # width (a shorter next line would otherwise leave stale characters
+    # from a longer previous one trailing after it).
+    sys.stderr.write(f"\r  {c('progress', f'[{bar}]')} {pct*100:5.1f}% ({current}/{total})  {label}\033[K")
     sys.stderr.flush()
 
 
 def _progress_done(label: str = ""):
-    sys.stderr.write(f"\r{' '*80}\r  {c('success', '✓')} {label}\n")
+    sys.stderr.write(f"\r\033[K  {c('success', '✓')} {label}\n")
     sys.stderr.flush()
 
 
@@ -350,14 +352,14 @@ async def run_scan(
             # garbled output.
             async with print_lock:
                 if result is not None:
-                    sys.stderr.write(f"\r{' '*80}\r")
+                    sys.stderr.write("\r\033[K")
                     tag = c(result.risk_level, f"[{result.risk_level.upper()}]")
                     vendor_info = f"{result.vendor or '?'} {result.model_hint or ''}"
                     fw_info = f" (FW: {result.firmware_version})" if result.firmware_version else ""
                     sys.stderr.write(f"  {tag} {c('ip', hr.ip):<16} {c('header', vendor_info):<35}{c('dim', fw_info)}\n")
                     sys.stderr.flush()
                 elif VERBOSE and hr.open_ports:
-                    sys.stderr.write(f"\r{' '*80}\r")
+                    sys.stderr.write("\r\033[K")
                     sys.stderr.write(f"  {c('dim', '·')} {c('detail', hr.ip):<16} not a mining device\n")
                     sys.stderr.flush()
                 _progress_bar(

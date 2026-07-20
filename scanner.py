@@ -267,6 +267,14 @@ async def run_scan(
     interrupted = asyncio.Event()
     _sigint_count = 0
 
+    # Populated once the worker pool exists (below) — declared here (as
+    # mutable containers, filled in later via .extend()/.add(), never
+    # reassigned) so the signal handler's closure sees whatever's actually
+    # in flight at the moment Ctrl+C fires, not just stop new work from
+    # starting via the cooperative `interrupted` flag.
+    scan_workers: list[asyncio.Task] = []
+    fingerprint_tasks: set[asyncio.Task] = set()
+
     def _on_sigint():
         nonlocal _sigint_count
         _sigint_count += 1
@@ -274,6 +282,10 @@ async def run_scan(
             sys.stderr.write("\n  Second interrupt — exiting immediately.\n")
             os._exit(130)
         interrupted.set()
+        for t in scan_workers:
+            t.cancel()
+        for t in fingerprint_tasks:
+            t.cancel()
 
     asyncio.get_running_loop().add_signal_handler(signal.SIGINT, _on_sigint)
 
@@ -312,18 +324,30 @@ async def run_scan(
 
     # ── Pipeline: scan + fingerprint per host ────────────────────
     #
-    # Each host runs its port scan, and — if it has an open port — its
-    # fingerprint immediately after, without waiting for every other host's
-    # port scan to finish first. The two steps still use separate semaphores
-    # (scan_sem sized for many short TCP connects, fp_sem sized much smaller
-    # for the heavier sequential HTTP fingerprinting requests), so a host
-    # that starts fingerprinting frees its scan_sem slot right away and lets
-    # another host's port scan start — that overlap is the whole point.
+    # A fixed-size pool of scan workers pulls IPs from a shared iterator —
+    # NOT one asyncio.Task created per host up front. Creating a Task per
+    # host (the previous approach) scales fine into the tens of thousands
+    # (a /16) but collapses on ranges like a /12 (1M+ hosts): each pending
+    # Task holds a live coroutine frame plus a waiter entry on the
+    # concurrency semaphore, so thousands become a few hundred MB and
+    # millions become a memory/scheduler meltdown — a semaphore only bounds
+    # how many tasks are *actively working*, not how many *exist*. A worker
+    # pool keeps exactly `concurrency` scan tasks alive regardless of range
+    # size.
+    #
+    # Fingerprinting stays on its own smaller semaphore rather than folded
+    # into the same worker loop: fingerprinting takes several sequential
+    # HTTP round trips, so a scan worker that fingerprinted inline would sit
+    # idle on a slow host instead of moving on to scan the next one. Instead
+    # a worker fires off fingerprinting as its own tracked task and
+    # immediately continues scanning — that overlap (fingerprinting one host
+    # while others are still being port-scanned) is the whole point of the
+    # pipeline. Hits are a small fraction of a real range, so one task per
+    # *hit* (not per host) stays cheap even on huge ranges.
     if not json_output:
         _stage(f"Scanning + fingerprinting {total_hosts} host(s)... (Ctrl+C to stop early and report what's found so far)")
 
     concurrency = scale_concurrency(total_hosts)
-    scan_sem = asyncio.Semaphore(concurrency)
     fp_sem = asyncio.Semaphore(FINGERPRINT_CONCURRENCY)
     rate_limiter = _RateLimiter(rate_limit) if rate_limit else None
 
@@ -331,20 +355,19 @@ async def run_scan(
     progress = {"scanned": 0, "hits": 0, "found": 0}
     print_lock = asyncio.Lock()
 
-    async def _pipeline_one(ip: str) -> None:
-        async with scan_sem:
-            hr = await scan_host(ip, ports, concurrency=50, timeout=timeout, rate_limiter=rate_limiter)
+    def _update_progress(last_ip: str):
+        if not json_output:
+            _progress_bar(
+                progress["scanned"], total_hosts,
+                f"open: {progress['hits']}  miners: {progress['found']}  last: {last_ip}",
+            )
 
-        result: Optional[MinerFingerprint] = None
-        if hr.open_ports:
-            progress["hits"] += 1
-            async with fp_sem:
-                result = await fingerprint_host(hr.ip, hr.open_ports, timeout=timeout)
-            if result is not None:
-                fingerprints.append(result)
-                progress["found"] += 1
-
-        progress["scanned"] += 1
+    async def _fingerprint_one(hr) -> None:
+        async with fp_sem:
+            result = await fingerprint_host(hr.ip, hr.open_ports, timeout=timeout)
+        if result is not None:
+            fingerprints.append(result)
+            progress["found"] += 1
 
         if not json_output:
             # Serialize terminal writes — with concurrent hosts in flight,
@@ -358,31 +381,43 @@ async def run_scan(
                     fw_info = f" (FW: {result.firmware_version})" if result.firmware_version else ""
                     sys.stderr.write(f"  {tag} {c('ip', hr.ip):<16} {c('header', vendor_info):<35}{c('dim', fw_info)}\n")
                     sys.stderr.flush()
-                elif VERBOSE and hr.open_ports:
+                elif VERBOSE:
                     sys.stderr.write("\r\033[K")
                     sys.stderr.write(f"  {c('dim', '·')} {c('detail', hr.ip):<16} not a mining device\n")
                     sys.stderr.flush()
-                _progress_bar(
-                    progress["scanned"], total_hosts,
-                    f"open: {progress['hits']}  miners: {progress['found']}  last: {hr.ip}",
-                )
+                _update_progress(hr.ip)
 
-    # Real Task objects, driven with asyncio.wait() rather than
-    # as_completed() — an early-interrupt break out of as_completed()
-    # leaks its internal waiter coroutines and prints "was never awaited"
-    # warnings at GC time.
-    pending = {asyncio.ensure_future(_pipeline_one(ip)) for ip in all_ips}
+    ip_iter = iter(all_ips)
 
-    was_interrupted = False
-    while pending:
-        if interrupted.is_set():
-            was_interrupted = True
-            for t in pending:
-                t.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            break
-        done, pending = await asyncio.wait(pending, timeout=0.2, return_when=asyncio.FIRST_COMPLETED)
+    async def _scan_worker() -> None:
+        # Advancing a plain iterator via `for` is synchronous (no await in
+        # between), so multiple workers sharing `ip_iter` can't race each
+        # other onto the same IP — asyncio only switches coroutines at an
+        # `await`, by which point this worker has already claimed its `ip`.
+        for ip in ip_iter:
+            if interrupted.is_set():
+                return
+            hr = await scan_host(ip, ports, concurrency=50, timeout=timeout, rate_limiter=rate_limiter)
+            progress["scanned"] += 1
 
+            if hr.open_ports:
+                progress["hits"] += 1
+                t = asyncio.ensure_future(_fingerprint_one(hr))
+                fingerprint_tasks.add(t)
+                t.add_done_callback(fingerprint_tasks.discard)
+            elif not json_output:
+                async with print_lock:
+                    _update_progress(ip)
+
+    # Extends the same list the SIGINT handler (registered above) already
+    # closes over, so a Ctrl+C reaching it cancels these directly.
+    scan_workers.extend(asyncio.ensure_future(_scan_worker()) for _ in range(concurrency))
+
+    await asyncio.gather(*scan_workers, return_exceptions=True)
+    if fingerprint_tasks:
+        await asyncio.gather(*fingerprint_tasks, return_exceptions=True)
+
+    was_interrupted = interrupted.is_set()
     if not json_output:
         if was_interrupted:
             _progress_done(c("warn", f"⚠ Interrupted — {progress['scanned']}/{total_hosts} hosts processed, {len(fingerprints)} miner(s) identified so far ({time.monotonic()-start_total:.1f}s)"))

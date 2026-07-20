@@ -29,7 +29,8 @@
         "path": "/",
         "regex": "[vV]ersion[:\"\\s]*([0-9]+\\.[0-9]+\\.[0-9]+)",
         "note": "Whatsminer FW version often visible on status page"
-      }
+      },
+      "note": "UNVERIFIED: a GitHub code search for this exact CGI path returned zero hits outside our own repo, and the real whatsminer backend in 256foundation/asic-rs only implements the cgminer RPC protocol (port 4028), not an HTTP API — so this path may not exist. Title/body patterns (vendor name) are likely fine regardless. No live device available to test."
     },
     {
       "id": "avalon",
@@ -37,28 +38,29 @@
       "models": ["A10", "A11", "A12", "A13"],
       "http_paths": ["/", "/cgi-bin/miner_status.cgi"],
       "title_patterns": ["Avalon", "AvalonMiner", "Canaan"],
-      "body_patterns": ["Avalon", "Canaan", "avalon"],
+      "body_patterns": ["Canaan"],
       "common_ports": [80, 443],
       "auth_indicator_path": "/cgi-bin/miner_status.cgi",
       "firmware_extraction": {
         "path": "/",
         "regex": "[vV]ersion[\"\\s:]*([0-9]+\\.[0-9]+\\.[0-9]+)",
         "note": "Avalon version in status page"
-      }
+      },
+      "note": "Dropped bare 'Avalon'/'avalon' from body_patterns — 'Avalon' alone is a fairly generic word/brand (FPGA bus naming, unrelated products) that could turn up incidentally in an unrelated device's page body; kept in title_patterns since a device's own page *title* being just 'Avalon' is a more deliberate signal than an incidental body mention. Could not verify /cgi-bin/miner_status.cgi against a live device or an authoritative source (asic-rs's avalonminer backend only implements the cgminer RPC protocol on 4028, not an HTTP API) — flagged as unverified, not confirmed correct."
     },
     {
       "id": "braiins_os",
       "vendor": "Braiins",
-      "models": ["Bosminer", "Braiins OS"],
-      "http_paths": ["/", "/api/v1/status", "/api/v1/overview"],
+      "models": ["Bosminer", "Braiins OS", "Braiins OS+"],
+      "http_paths": ["/", "/api/v1/miner/details"],
       "title_patterns": ["Braiins", "Bosminer", "bosminer"],
-      "body_patterns": ["Braiins OS", "braiins", "bos+"],
+      "body_patterns": ["Braiins OS", "braiins"],
       "common_ports": [80, 443],
-      "auth_indicator_path": "/api/v1/status",
+      "auth_indicator_path": "/api/v1/miner/details",
       "firmware_extraction": {
-        "path": "/api/v1/status",
+        "path": "/api/v1/miner/details",
         "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
-        "note": "Braiins REST API returns JSON with version"
+        "note": "The old /api/v1/status and /api/v1/overview paths don't appear in any real Braiins OS+ client or docs I could find. A real open-source Home Assistant integration (aleixps/Braiins-OS-HA) confirms the actual BOS+ management API lives under /api/v1/{auth/login, miner/details, configuration/constraints, miner/hw/hashboards, miner/stats}, all requiring a Bearer token obtained via POST /api/v1/auth/login (401 on every other endpoint without one) — so 'Auth: Required' should reliably detect on real BOS+ devices. Dropped the overly-generic 'bos+' body pattern too. Not verified against a live device, and plain (non-+) Braiins OS may differ — flag if this doesn't match in practice."
       }
     },
     {
@@ -80,7 +82,8 @@
       "title_patterns": ["Vnish", "vnish"],
       "body_patterns": ["Vnish Firmware", "vnish"],
       "common_ports": [80, 443],
-      "auth_indicator_path": "/api/summary"
+      "auth_indicator_path": "/api/summary",
+      "note": "PARTIALLY UNVERIFIED: checked the real vnish backend source (256foundation/asic-rs) and its actual API base path is /api/v1/{command} with Bearer-token auth via /api/v1/unlock — '/api/summary' (no /v1/, and 'summary' isn't a command name I could find in that source) looks wrong, but I couldn't pin down the exact read-only status command to replace it with confidently. Title/body patterns look fine (vendor name is specific). Treat auth_indicator_path/firmware_extraction here as unreliable until checked against a live device."
     },
     {
       "id": "luxor",
@@ -90,51 +93,52 @@
       "title_patterns": ["LuxOS", "Luxor", "luxor"],
       "body_patterns": ["LuxOS", "luxor"],
       "common_ports": [80, 443, 4028, 3333],
-      "auth_indicator_path": "/api/status"
+      "auth_indicator_path": "/api/status",
+      "note": "UNVERIFIED: couldn't confirm /api/status against any authoritative source — the real luxminer backend in 256foundation/asic-rs only implements the cgminer RPC protocol on port 4028/3333, not an HTTP API, so this path may not exist at all. Title/body patterns (vendor name) are likely fine regardless. No live device available to test."
     },
     {
       "id": "bitaxe",
       "vendor": "OSMU (Open Source Miners United)",
       "models": ["Bitaxe Ultra", "Bitaxe Supra", "Bitaxe Gamma", "Bitaxe Hex", "Bitaxe Max"],
-      "http_paths": ["/", "/api/system", "/api/system/info", "/api/miner"],
+      "http_paths": ["/", "/api/system/info"],
       "title_patterns": ["Bitaxe", "BitAxe", "bitaxe", "BITAXE", "ESP-Miner"],
       "body_patterns": ["Bitaxe", "BitAxe", "bitaxe", "BM1366", "BM1368", "BM1397"],
       "common_ports": [80],
-      "auth_indicator_path": "/api/system",
+      "auth_indicator_path": "/api/system/info",
       "firmware_extraction": {
-        "path": "/api/system",
-        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
-        "note": "ESP-Miner firmware exposes version via /api/system JSON"
+        "path": "/api/system/info",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "Verified against a live device: /api/system (no suffix) and /api/miner both 404 on real AxeOS firmware, and the JSON has no 'firmwareVersion' field — the real fields are 'version'/'axeOSVersion'/'idfVersion'/'boardVersion' on /api/system/info. In practice the 'axeos' signature below will usually win ties for current firmware anyway, since it titles itself 'AxeOS' rather than 'Bitaxe' — this entry mainly matters for older firmware or body-only matches."
       }
     },
     {
       "id": "nerdqaxe",
       "vendor": "OSMU (Open Source Miners United)",
       "models": ["NerdQaxe", "NerdQaxe+", "NerdQAxe+"],
-      "http_paths": ["/", "/api/system", "/api/system/info", "/api/miner"],
+      "http_paths": ["/", "/api/system/info"],
       "title_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "NerdQaxe+", "NerdQAxe+"],
       "body_patterns": ["NerdQaxe", "NerdQAxe", "nerdqaxe", "BM1366", "BM1368"],
       "common_ports": [80],
-      "auth_indicator_path": "/api/system",
+      "auth_indicator_path": "/api/system/info",
       "firmware_extraction": {
-        "path": "/api/system",
-        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
-        "note": "ESP-Miner firmware, shared codebase with Bitaxe"
+        "path": "/api/system/info",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "ESP-Miner firmware, shared codebase with Bitaxe/AxeOS. Same path/field fix as the bitaxe signature — verified against a live device."
       }
     },
     {
       "id": "esp_miner",
       "vendor": "OSMU / Generic",
       "models": ["ESP-Miner", "ESP32-S3 Miner", "OSMU Board"],
-      "http_paths": ["/", "/api/system", "/api/system/info"],
+      "http_paths": ["/", "/api/system/info"],
       "title_patterns": ["ESP-Miner", "ESP Miner", "Open Source Miner", "OSMU"],
-      "body_patterns": ["ESP-Miner", "ASIC Miner", "BM1366", "BM1368", "BM1397", "ESP32"],
+      "body_patterns": ["ESP-Miner", "ASIC Miner", "BM1366", "BM1368", "BM1397"],
       "common_ports": [80],
-      "auth_indicator_path": "/api/system",
+      "auth_indicator_path": "/api/system/info",
       "firmware_extraction": {
-        "path": "/api/system",
-        "regex": "\"firmwareVersion\"\\s*:\\s*\"([^\"]+)\"",
-        "note": "Catch-all for community ESP32-based OSMU miners"
+        "path": "/api/system/info",
+        "regex": "\"version\"\\s*:\\s*\"([^\"]+)\"",
+        "note": "Catch-all for community ESP32-based OSMU miners. Same path/field fix as bitaxe/nerdqaxe — /api/system (no suffix) 404s and 'firmwareVersion' isn't a real field on live ESP-Miner-derived firmware. Dropped bare 'ESP32' from body_patterns: on its own (title=0, body=2) it clears the >=2 match threshold, and ESP32 is an extremely common chip in unrelated IoT gear (smart plugs, sensors) that could mention it in their own page body — a real false-positive risk, not just a theoretical one (same class of concern as generic router/switch web panels false-flagging)."
       },
       "note": "Catch-all signature for unrecognized ESP-Miner derivatives. Will only match if more specific Bitaxe/NerdQaxe patterns don't trigger first."
     },

@@ -24,13 +24,35 @@ Each finding gets a risk level (`critical` → `info`) and a one-line explanatio
 ## Install
 
 ```bash
-pip install .              # from a clone of this repo
-# or, for development (edits take effect without reinstalling):
-pip install -e .
+git clone https://github.com/ckz666/miner-audit.git
+cd miner-audit
+pip install .              # or -e . for development (edits take effect without reinstalling)
 ```
 
 This installs a `miner-audit` command on your `PATH`. No external dependencies —
 standard library only.
+
+**On Kali, current Ubuntu/Debian, or anything else with Python 3.11+:** a plain
+`pip install` into the system Python will refuse with `externally-managed-environment`
+(PEP 668). Use a venv or `pipx` instead:
+
+```bash
+# venv (recommended if you're also editing the code — use -e . inside it)
+python3 -m venv ~/.venvs/miner-audit
+source ~/.venvs/miner-audit/bin/activate
+pip install -e .
+
+# or pipx (simplest if you just want the command available, no editing)
+pipx install .
+```
+
+If you used a venv, `miner-audit` only exists while it's activated. To get it on
+your `PATH` in every new terminal without manually activating, add this to your
+`~/.bashrc`:
+
+```bash
+export PATH="$HOME/.venvs/miner-audit/bin:$PATH"
+```
 
 ## Usage
 
@@ -91,7 +113,14 @@ Each target IP runs through a two-step pipeline, but the steps are pipelined
 *across* hosts rather than run as two separate whole-range passes:
 
 1. **Port scan** — checked against a small set of miner-relevant ports (80, 443,
-   22, 3333, 4028, 8080 by default).
+   22, 3333, 4028, 8080 by default). For 22, 3333, and 4028, a bare TCP handshake
+   isn't enough to count as "open": a minimal read-only protocol probe confirms the
+   port actually speaks SSH, Stratum V1, or the cgminer RPC API before trusting it
+   — a middlebox or unrelated service that completes a TCP handshake without
+   speaking the real protocol is otherwise indistinguishable from the real thing,
+   and those three ports are treated as a strong signal on their own further down
+   the pipeline. 80/443/8080 don't need this: the HTTP fingerprint step below
+   already only matches a real response.
 2. **Fingerprint** — if a host has at least one open port, it gets a `GET /` (and
    vendor-specific follow-up requests) immediately, without waiting for the rest of
    the range to finish scanning — to identify what it's running, whether auth is
@@ -101,4 +130,14 @@ The two steps use separate concurrency limits (port scanning is many short TCP
 connects and scales with range size; fingerprinting is a handful of sequential HTTP
 requests per host, capped much lower) so a host that starts fingerprinting doesn't
 block another host's port scan from starting. Both steps are read-only: TCP connect
-+ HTTP GET, nothing else.
++ HTTP GET (or the equivalent read-only query for 22/3333/4028), nothing else.
+
+## False positives
+
+Signature patterns are checked against real devices and real upstream source where
+possible, not just written from memory — generic terms that happen to double as a
+mining signal (a common chip name, a common JSON field name, a brand word reused by
+unrelated products) have caused real false positives against non-mining gear (an
+unrelated router's admin panel, for one) and are actively avoided. If you get a
+result that looks wrong, it's worth a bug report — false positives are treated as
+real bugs here, not just noise.
